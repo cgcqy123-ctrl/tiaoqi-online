@@ -1,0 +1,280 @@
+# 中国跳棋 · 联机版（纯静态 / GitHub Pages 可托管）
+
+一个**不需要服务器、不需要注册账号**的双人中国跳棋网页：房主点一下「创建房间」拿到 4 位房号，
+把房号发给朋友，他输入房号就能入座开局；第三个人起自动变成观战。
+
+联机走 WebRTC 点对点直连（PeerJS），对局逻辑完全在房主浏览器里跑，另一方只发动作、收视图。
+整个网站就是几个静态文件，直接丢到 GitHub Pages 就能玩。
+
+**在线试玩**：<https://cgcqy123-ctrl.github.io/tiaoqi-online/> ｜ **仓库**：<https://github.com/cgcqy123-ctrl/tiaoqi-online>
+
+![纯静态](https://img.shields.io/badge/backend-none-brightgreen)
+![依赖](https://img.shields.io/badge/deps-PeerJS%20(已内置)-blue)
+![许可证](https://img.shields.io/badge/license-MIT-lightgrey)
+
+---
+
+## 目录
+
+- [三分钟部署到 GitHub Pages](#三分钟部署到-github-pages)
+- [本地试玩](#本地试玩)
+- [怎么玩](#怎么玩)
+- [已实现的规则](#已实现的规则)
+- [联机原理](#联机原理)
+- [常见问题](#常见问题)
+- [进阶：自建信令服务器](#进阶自建信令服务器)
+- [目录结构](#目录结构)
+- [开发与测试](#开发与测试)
+- [协议速查](#协议速查)
+- [已知限制](#已知限制)
+
+---
+
+## 三分钟部署到 GitHub Pages
+
+**1. 在 GitHub 上新建一个空仓库**（例如 `tiaoqi-online`），不要勾选 README / .gitignore。
+
+**2. 推送代码**（把地址换成你自己的）：
+
+```bash
+git remote add origin https://github.com/<你的用户名>/tiaoqi-online.git
+git branch -M main
+git push -u origin main
+```
+
+**3. 打开仓库 → Settings → Pages → Build and deployment**
+- **Source 选 `GitHub Actions`**（推荐，本仓库自带工作流，推送后自动跑测试再发布）；
+- 或者选 `Deploy from a branch` → `main` / `/ (root)`。
+
+**4. 等 1 分钟左右**，访问：
+
+```
+https://<你的用户名>.github.io/tiaoqi-online/
+```
+
+把链接发到群里就能开局了。手机浏览器建议加「添加到主屏幕」，和 App 差不多。
+
+> 免费账号的 Pages 只对 **public 仓库**开放；私有仓库要用 Pro。
+
+---
+
+## 本地试玩
+
+浏览器的 WebRTC 只在**安全上下文**（`https://` 或 `http://localhost`）下可用，
+所以**不能直接双击 `index.html`**（`file://` 会失败），必须起一个本地服务器：
+
+```bash
+node tools/serve.mjs          # 自带零依赖静态服务器，默认 http://localhost:8080
+# 或者
+python -m http.server 8080    # 或者 npx serve .
+```
+
+开**两个浏览器标签页**（或一个电脑 + 一部手机连同一 WiFi）分别创建 / 加入同一个房号；
+想试观战再开第三个标签页。一个人也能「两个标签页对打」。
+
+---
+
+## 怎么玩
+
+| 步骤 | 说明 |
+| --- | --- |
+| 建房 | 填昵称 → 「创建房间」→ 屏幕上的 4 位房号就是房间号，房主执红先行（棋盘下方营） |
+| 加入 | 填昵称 + 4 位房号 → 「加入房间」，自动坐在蓝方（上方营） |
+| 开局 | 两人到齐后房主点「开始对局」 |
+| 走棋 | 轮到你时点自己的棋子，棋盘会亮出金色落点：点一下就走过去 |
+| 走一步 | 走到相邻的空孔，一次一格 |
+| 连跳 | 隔着一颗棋子（自己的或对方的都行）跳到正后方空孔，一次可以连跳好几下，方向随意 |
+| 目标 | 把自己 **10 颗棋子全部走进对面那个营**（红方进上方营、蓝方进下方营）即获胜 |
+| 提示 | 玩家名字旁显示「入营 n/10」的进度，营区会按红/蓝淡色标出来 |
+| 悔棋 | 点「悔棋」→ 对方同意后回到**你上一步之前**：刚走完对方还没走只退 1 手，对方已经走过则退 2 手 |
+| 求和 | 点「求和」，对方同意即和棋；对方拒绝则继续 |
+| 认输 | 点「认输」需要再点一次「确定认输」，防误触 |
+| 结束 | 全部入营 / 认输 / 双方和棋都会弹出结算浮层，房主可点「再来一局」 |
+| 观战 | 第三位起自动进入观战位（最多 6 人），只能看棋和聊天 |
+| 聊天 | 右侧（手机上在下方）切到「聊天」页，有几句快捷语，也能自己输入 |
+
+棋谱会实时记录成「跳 2 下」「走 1 步」这样的走法列表，轮到谁、走了几步一目了然。
+
+---
+
+## 已实现的规则
+
+标准六角星棋盘：中心六边形 + 六个三角营，共 **121 个孔**。本作只做**双人对角两营**：
+红方从下方营出发、目标是上方营；蓝方反之。**红先蓝后**。
+
+- **走一步**：棋子走到相邻的空孔（六个方向）。
+- **连跳**：隔着一颗棋子（自己的、对方的都可以）跳到这条线正后方的空孔；可以连续跳，
+  每次落点都必须是空孔，方向可以中途改变。
+- **不能混合**：一手要么走一步，要么全是跳，不能「走一步再跳」。
+- **不重复经过**：同一手里不能两次落到同一个孔（防绕圈）。
+- **不吃子**：跳过去的棋子留在原位，不会被吃掉。
+- **胜负**：哪一方先把自己的 10 颗棋子全部填进对面营的 10 个孔，哪一方获胜。
+- **和棋**：本作没有自动和棋（没有吃子、棋盘不会下满），双方可以随时协商「求和」。
+- 悔棋 / 求和 / 认输 / 再来一局，都是「需要对方同意」或「只有房主能开新局」的社交规则。
+
+---
+
+## 联机原理
+
+```
+房主浏览器 ──(WebRTC DataChannel)──> 对手（蓝方）
+     ├──────(WebRTC DataChannel)──> 观众 A
+     └──────(WebRTC DataChannel)──> 观众 B
+            ↑ 只靠公共 PeerJS 信令服务器牵线（不传对局数据）
+```
+
+- **信令**：用 PeerJS 官方免费公共服务器（`0.peerjs.com`）交换 SDP，只负责「牵线」，不参与游戏。
+- **对局**：房主是唯一权威，负责校验每一步走法、判断入营胜负、维护悔棋求和，并把局面推给每个人。
+- **房号**：`tiaoqi-` + 4 位大写字母数字，对应 PeerJS 的 peer id；撞号会自动换一个。
+- **座位**：0 号位（房主，红）→ 1 号位（对手，蓝）→ 2 号位起是观战，最多 8 个连接。
+- **掉线重连**：座位名字会保留，同名重新加入即可坐回原位（对局中也可以，回来立刻收到当前局面）。
+
+---
+
+## 常见问题
+
+**连不上 / 一直转圈**
+公共信令服务器偶尔抽风，等几秒重试；公司/校园网若禁用 UDP，P2P 可能打洞失败，换手机热点再试。
+实在不行就[自建信令服务器](#进阶自建信令服务器)。
+
+**iPhone / Safari 连不上**
+- 先把 iOS 升级到较新版本，Safari 设置里不要开「阻止所有 Cookie」；无痕模式也建议先退出（页面已对禁止 localStorage 的隐私模式做了兜底）。
+- 如果朋友用 4G/5G、或和房主不是同一个 WiFi，P2P 打洞可能失败：先换到**同一个 WiFi** 重试。
+- 已内置国内可访问的 STUN + 握手消息重发（Safari 偶尔会吞掉连接建立后的第一条消息）；如果还卡在「等待对手入座」或「正在进入房间」，刷新页面再试。
+- 网络环境实在打不了洞（对称 NAT / 运营商限制），需要 TURN 中继：见[进阶：自建信令服务器](#进阶自建信令服务器)里的 TURN 配置。
+
+**提示「房号不存在或房主已离线」**
+房号错了一位，或者房主关掉了页面。房主必须保持页面在前台（可以切后台，但别关）。
+
+**为什么我的棋子跳不过去？**
+连跳要求「中间隔一颗棋子、正后方是空孔」。如果中间是空的、或者正后方有棋子，都不能跳。
+另外一手棋不能「先走一步再跳」。
+
+**为什么棋子走进营里又出来了？**
+跳棋不限制你待在营里，任何时候都可以往任何方向走/跳；只要最后 10 颗都填满对面营就算赢。
+
+**第三个人为什么不能下棋**
+房间只有两个对局位，第三位起自动进入观战（可以看到棋局和聊天）。想换人，让原来那位「菜单 → 离开房间」。
+
+**想一个人玩**
+本版本只做真人对战，没有内置 AI；一个人可以开两个标签页自己跟自己下。
+
+**手机上打不开**
+必须是 `https://` 或 `localhost`。GitHub Pages 天然是 https，没问题。
+
+---
+
+## 进阶：自建信令服务器
+
+`js/net.js` 支持覆盖 PeerJS 配置。在 `index.html` 里 `peerjs.min.js` 之前加一段：
+
+```html
+<script>
+  // 默认留空 = 使用 PeerJS 官方公共服务器
+  window.PEER_OPTIONS = {
+    host: 'your-peer-server.com',
+    port: 443,
+    path: '/',
+    secure: true,
+    key: 'peerjs',
+  };
+</script>
+```
+
+自建方式：`npx peerjs --port 9000 --path /myapp`，再用 Nginx 反代到 https。
+
+如果朋友在 4G / 不同网络下打洞失败，可以再加一台 TURN 中继（`coturn` 是最常用的开源实现），
+把 TURN 地址一起传给 PeerJS：
+
+```html
+<script>
+  window.PEER_OPTIONS = {
+    host: 'your-peer-server.com',
+    port: 443,
+    path: '/',
+    secure: true,
+    key: 'peerjs',
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun.miwifi.com:3478' },
+        { urls: 'turn:turn.your-server.com:3478', username: 'user', credential: 'pass' },
+      ],
+    },
+  };
+</script>
+```
+
+> 只配 `config` 而不写 `config.iceServers` 时，页面会自动补上内置的 STUN 列表。
+
+---
+
+## 目录结构
+
+```
+.
+├── index.html              # 页面骨架（首页 / 房间 / 棋桌三个视图）
+├── css/style.css           # 全部样式（移动端优先，木纹星形棋盘）
+├── js/
+│   ├── rules.js            # 121 孔星形棋盘、走一步/连跳、入营判定、几何数据（纯函数）
+│   ├── game.js             # 对局状态机：走子 / 悔棋 / 求和 / 认输 / 视图
+│   ├── net.js              # PeerJS 联机层（房主 HostRoom / 加入者 GuestRoom）
+│   ├── ui.js               # 渲染与交互：SVG 棋盘、棋谱、聊天、结算浮层
+│   ├── main.js             # 入口：大厅、房间、对局、网络串联
+│   └── vendor/peerjs.min.js# PeerJS 1.5.5 浏览器版（已内置，不依赖 CDN）
+├── test/
+│   ├── rules.test.mjs      # 棋盘/走法/连跳/入营（纯逻辑，无依赖）
+│   ├── game.test.mjs       # 状态机、悔棋、求和、认输、随机对局校验
+│   ├── ui-smoke.mjs        # jsdom：点棋子走完整流程，检查渲染与交互
+│   └── e2e-smoke.mjs       # jsdom + 假 Peer：建房/入座/对弈/悔棋/聊天/观战/重连全流程
+├── tools/serve.mjs         # 本地静态服务器
+└── .github/workflows/pages.yml  # 推送 → 跑测试 → 部署 GitHub Pages
+```
+
+---
+
+## 开发与测试
+
+```bash
+npm install        # 只有 UI / 端到端测试需要 jsdom，纯逻辑测试零依赖
+npm run test       # 规则 + 状态机单元测试
+npm run test:ui    # jsdom 里点棋子走完整局
+npm run test:e2e   # jsdom + 假 PeerJS 跑完整联机流程
+npm run test:all   # 上面三个一起跑（CI 跑的就是这个）
+npm run serve      # 本地起服务，http://localhost:8080
+```
+
+`js/rules.js` 和 `js/game.js` 不碰 DOM、不碰网络，可以单独跑；
+`js/ui.js` 只碰 DOM；`js/net.js` 只碰 PeerJS。
+
+CI：每次 push 到 `main` 会自动 `npm ci && npm run test:all`，测试通过才发布。
+
+> **改完记得升版本号**：把 `index.html` 里两处 `?v=1`（`css/style.css?v=1`、`js/main.js?v=1`）的数字 +1，
+> 子模块会自动继承这个版本号，朋友刷新即可看到新版。
+
+---
+
+## 协议速查
+
+房主 → 成员：`{t:'joined', seat, code, side, spectator}`、`{t:'lobby', code, players, spectators, youSeat}`、
+`{t:'state', view}`、`{t:'chat', msg}`、`{t:'chatLog', list}`、`{t:'toast', msg}`、`{t:'full'}`
+
+成员 → 房主：`{t:'hello', name}`、`{t:'chat', text}`、
+`{t:'action', a:{type:'move', from, path}}` / `{type:'undo'}` / `{type:'undoReply', accept}` /
+`{type:'draw'}` / `{type:'drawReply', accept}` / `{type:'resign'}` / `{type:'restart'}`
+
+`view` = 局面 + 双方信息 + 棋谱 + 待回应的请求 + 结算结果 + 你坐哪一桌（观战为 `seat:-1`）。
+`path` 只记录落点：走一步是 `[from, to]`，连跳是 `[from, 落点1, 落点2, ...]`。
+
+---
+
+## 已知限制
+
+- **只做双人**（两个对角营），不支持 3/4/6 人混战。
+- 没有 AI、没有棋钟、没有自动和棋/循环局面判定。
+- 房主是权威、也是「服务器」，房主退出即散局。
+- 依赖公共信令服务器，极端网络环境（对称 NAT / 运营商限制）可能连不上；跨网络建议按上文配置 TURN。
+
+## License
+
+MIT
