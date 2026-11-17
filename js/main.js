@@ -4,10 +4,13 @@
 // 以后改版只要把 index.html 里的版本号 +1，浏览器就不会继续用旧缓存。
 //
 // 角色分工：房主（host）是唯一权威，跑对局状态机、校验走子、广播视图；
-// 另一位玩家和所有观众只提交动作 / 收视图。
+// 其他玩家和所有观众只提交动作 / 收视图。
+//
+// 2-6 人：房主在首页选人数；座位号就是棋子编码（0 也是有效棋子，判空一律 === null）。
 
 const V = new URL(import.meta.url).search;
 const { Game, PHASE } = await import('./game.js' + V);
+const R = await import('./rules.js' + V);
 const { HostRoom, GuestRoom, normalizeCode } = await import('./net.js' + V);
 const UI = await import('./ui.js' + V);
 
@@ -23,8 +26,8 @@ const store = {
   },
 };
 
-/** 座位安排：0 = 房主（红方，先行，下方营），1 = 对手（蓝方），2 起为观战 */
-const MAX_SEATS = 8;
+/** 座位安排：0 = 房主（红方，先行），1..N-1 = 其他玩家；观战座号 = playerCount + 观战序号，最多 6 个观战 */
+const MAX_SPECS = 6;
 const CHAT_KEEP = 60;
 
 const S = {
@@ -32,17 +35,23 @@ const S = {
   role: null, // 'host' | 'guest'
   seat: 0,
   code: '',
+  playerCount: 2, // 房主在首页选的人数（2-6），创建房间后固定
   host: null,
   guest: null,
   game: null,
-  lobbyPlayers: null, // 房主侧：[{name, connected}, {name, connected}]
-  spec: [], // 房主侧：S.spec[i] = 座号 2+i 的观众昵称，null = 空位
+  lobbySeats: null, // 房主侧：长度 = playerCount 的 [{name, connected}]
+  spec: [], // 房主侧：S.spec[i] = 观战座号 playerCount+i 的观众昵称，null = 空位
   remoteSpecs: [], // 加入者侧：房主同步过来的观众昵称
   chat: [],
   busy: false,
 };
 
 /* ---------------- 通用 ---------------- */
+
+function clampCount(n) {
+  const v = Number(n);
+  return R.PLAYER_COUNTS.includes(v) ? v : 2;
+}
 
 function getName() {
   const v = $('in-name').value.trim().slice(0, 8);
@@ -72,7 +81,7 @@ function resetAll() {
   S.role = null;
   S.seat = 0;
   S.code = '';
-  S.lobbyPlayers = null;
+  S.lobbySeats = null;
   S.spec = [];
   S.remoteSpecs = [];
   S.chat = [];
@@ -86,6 +95,8 @@ function decorate(view, isHost) {
   view._code = S.code;
   view._isHost = !!isHost;
   view._spectators = S.role === 'host' ? S.spec.filter(Boolean) : S.remoteSpecs || [];
+  // 契约 §2 要求视图带 camps；万一 game.view 没填（或旧缓存模块），这里按人数补一份，保证 UI 能画营
+  if (!Array.isArray(view.camps)) view.camps = R.campsForCount(view.count || S.playerCount);
   return view;
 }
 
@@ -105,6 +116,42 @@ function sysMsg(text) {
   return entry;
 }
 
+/* ---------------- 座位 / 名字 ---------------- */
+
+/** 座位号是不是玩家位（0..playerCount-1）；观战位从 playerCount 起 */
+function isPlayerSeat(seat) {
+  return Number.isInteger(seat) && seat >= 0 && seat < S.playerCount;
+}
+
+/** 玩家座位对应的营下标；观战返回 null */
+function campOf(seat) {
+  return isPlayerSeat(seat) ? R.campsForCount(S.playerCount)[seat] : null;
+}
+
+function seatName(seat) {
+  if (!isPlayerSeat(seat)) return S.spec[seat - S.playerCount] || '观众';
+  return (S.lobbySeats && S.lobbySeats[seat] && S.lobbySeats[seat].name) || '玩家';
+}
+
+function specNames() {
+  return S.spec.filter(Boolean);
+}
+
+/** 房主侧：所有还连着、需要接收广播的远端座位（玩家位 + 观战位） */
+function remoteSeats() {
+  const out = [];
+  if (S.lobbySeats) {
+    for (let seat = 1; seat < S.playerCount; seat++) {
+      const p = S.lobbySeats[seat];
+      if (p && p.name && p.connected) out.push(seat);
+    }
+  }
+  S.spec.forEach((n, i) => {
+    if (n) out.push(S.playerCount + i);
+  });
+  return out;
+}
+
 /* ---------------- 房主 ---------------- */
 
 async function createRoom() {
@@ -114,10 +161,9 @@ async function createRoom() {
   S.role = 'host';
   S.seat = 0;
   S.name = name;
-  S.lobbyPlayers = [
-    { name, connected: true },
-    { name: null, connected: false },
-  ];
+  S.playerCount = clampCount(S.playerCount);
+  S.lobbySeats = Array.from({ length: S.playerCount }, (_, seat) =>
+    seat === 0 ? { name, connected: true } : { name: null, connected: false });
   S.spec = [];
   S.chat = [];
   try {
@@ -130,7 +176,7 @@ async function createRoom() {
     S.host = room;
     S.code = await room.open();
     hostRenderLobby();
-    sysMsg(`房间 ${S.code} 已创建，把房号发给朋友吧`);
+    sysMsg('房间 ' + S.code + ' 已创建（' + S.playerCount + ' 人局），把房号发给朋友吧');
   } catch (e) {
     UI.toast(e && e.message ? e.message : '创建房间失败');
     resetAll();
@@ -139,26 +185,33 @@ async function createRoom() {
   }
 }
 
-function remoteSeats() {
-  const out = [];
-  if (S.lobbyPlayers && S.lobbyPlayers[1].name && S.lobbyPlayers[1].connected) out.push(1);
-  S.spec.forEach((n, i) => {
-    if (n) out.push(2 + i);
+/** 给某个座位补发 joined（首次入座和 Safari 重复 hello 幂等重发共用） */
+function hostSendJoined(seat) {
+  const isSpec = !isPlayerSeat(seat);
+  S.host.send(seat, {
+    t: 'joined',
+    seat,
+    code: S.code,
+    spectator: isSpec,
+    playerCount: S.playerCount,
+    camp: isSpec ? null : campOf(seat),
   });
-  return out;
 }
 
-function specNames() {
-  return S.spec.filter(Boolean);
-}
-
-function seatName(seat) {
-  if (seat >= 2) return S.spec[seat - 2] || '观众';
-  return (S.lobbyPlayers[seat] && S.lobbyPlayers[seat].name) || '玩家';
+/** 给某个座位发大厅同步 */
+function hostSendLobby(seat) {
+  S.host.send(seat, {
+    t: 'lobby',
+    code: S.code,
+    players: S.lobbySeats,
+    spectators: specNames(),
+    playerCount: S.playerCount,
+    youSeat: seat,
+  });
 }
 
 function hostOnHello(conn, name, existingSeat) {
-  if (!S.lobbyPlayers) {
+  if (!S.lobbySeats) {
     S.host.sendRaw(conn, { t: 'full' });
     return;
   }
@@ -166,22 +219,9 @@ function hostOnHello(conn, name, existingSeat) {
 
   // 重发 hello（Safari 丢第一条消息时）：连接已绑座位，幂等补发入座信息和大厅
   if (existingSeat !== undefined && existingSeat !== null) {
-    const isSpec = existingSeat >= 2;
-    S.host.send(existingSeat, {
-      t: 'joined',
-      seat: existingSeat,
-      code: S.code,
-      side: isSpec ? null : existingSeat === 0 ? 'r' : 'b',
-      spectator: isSpec,
-    });
+    hostSendJoined(existingSeat);
     S.host.send(existingSeat, { t: 'chatLog', list: S.chat });
-    S.host.send(existingSeat, {
-      t: 'lobby',
-      code: S.code,
-      players: S.lobbyPlayers,
-      spectators: specNames(),
-      youSeat: existingSeat,
-    });
+    hostSendLobby(existingSeat);
     if (S.game && S.game.phase !== PHASE.LOBBY) pushStates();
     else hostRenderLobby();
     return;
@@ -189,18 +229,31 @@ function hostOnHello(conn, name, existingSeat) {
 
   let seat = -1;
 
-  // 1) 同名重连：坐回 1 号位（对局中掉线也能回来）
-  if (S.lobbyPlayers[1].name === clean) seat = 1;
-  // 2) 1 号位空着
-  else if (!S.lobbyPlayers[1].name) seat = 1;
-  // 3) 观战位
-  else {
+  // 1) 同名且离线的玩家优先回座（房主座位 0 不参与，房主不会掉线重连）
+  for (let s = 1; s < S.playerCount; s++) {
+    const p = S.lobbySeats[s];
+    if (p && p.name === clean && !p.connected) {
+      seat = s;
+      break;
+    }
+  }
+  // 2) 第一个空玩家座位
+  if (seat < 0) {
+    for (let s = 1; s < S.playerCount; s++) {
+      if (!S.lobbySeats[s].name) {
+        seat = s;
+        break;
+      }
+    }
+  }
+  // 3) 玩家满：观战位（优先复用空掉的观战位，再追加，最多 MAX_SPECS 个）
+  if (seat < 0) {
     const free = S.spec.findIndex((n) => !n);
     if (free >= 0) {
-      seat = 2 + free;
+      seat = S.playerCount + free;
       S.spec[free] = clean;
-    } else if (S.spec.length + 2 < MAX_SEATS) {
-      seat = 2 + S.spec.length;
+    } else if (S.spec.length < MAX_SPECS) {
+      seat = S.playerCount + S.spec.length;
       S.spec.push(clean);
     }
   }
@@ -212,8 +265,8 @@ function hostOnHello(conn, name, existingSeat) {
   }
 
   S.host.bind(conn, seat);
-  const isSpec = seat >= 2;
-  if (!isSpec) S.lobbyPlayers[seat] = { name: clean, connected: true };
+  const isSpec = !isPlayerSeat(seat);
+  if (!isSpec) S.lobbySeats[seat] = { name: clean, connected: true };
   if (S.game && !isSpec) {
     const p = S.game.players.find((x) => x.seat === seat);
     if (p) {
@@ -222,24 +275,12 @@ function hostOnHello(conn, name, existingSeat) {
     }
   }
 
-  const entry = sysMsg(`${clean} ${isSpec ? '进入观战' : '加入了房间'}`);
-  S.host.send(seat, {
-    t: 'joined',
-    seat,
-    code: S.code,
-    side: isSpec ? null : seat === 0 ? 'r' : 'b',
-    spectator: isSpec,
-  });
+  const entry = sysMsg(clean + (isSpec ? ' 进入观战' : ' 加入了房间'));
+  hostSendJoined(seat);
   S.host.send(seat, { t: 'chatLog', list: S.chat });
-  S.host.send(seat, {
-    t: 'lobby',
-    code: S.code,
-    players: S.lobbyPlayers,
-    spectators: specNames(),
-    youSeat: seat,
-  });
+  hostSendLobby(seat);
   hostBroadcastChat(entry, seat);
-  if (!isSpec) UI.toast(`${clean} 加入了房间`);
+  if (!isSpec) UI.toast(clean + ' 加入了房间（' + S.lobbySeats.filter((p) => p.name).length + '/' + S.playerCount + '）');
 
   if (S.game && S.game.phase !== PHASE.LOBBY) pushStates();
   else hostRenderLobby();
@@ -266,26 +307,30 @@ function hostBroadcastChat(entry, exceptSeat = -1) {
 }
 
 function hostOnSeatGone(seat) {
-  if (seat >= 2) {
-    const idx = seat - 2;
+  if (!S.lobbySeats) return;
+  if (!isPlayerSeat(seat)) {
+    // 观众退出：清空观战位并广播
+    const idx = seat - S.playerCount;
     if (S.spec[idx]) {
       const who = S.spec[idx];
       S.spec[idx] = null;
       while (S.spec.length && !S.spec[S.spec.length - 1]) S.spec.pop();
-      const entry = sysMsg(`${who} 退出观战`);
+      const entry = sysMsg(who + ' 退出观战');
       hostBroadcastChat(entry);
     }
-  } else if (seat === 1) {
-    const who = S.lobbyPlayers[1].name;
-    S.lobbyPlayers[1] = { name: who, connected: false };
-    if (S.game) {
-      const p = S.game.players.find((x) => x.seat === 1);
-      if (p) p.connected = false;
-    }
-    if (who) {
-      const entry = sysMsg(`${who} 掉线了，等待重连…`);
+  } else {
+    // 玩家掉线：保留昵称、标记离线，等他同名重连
+    const p = S.lobbySeats[seat];
+    if (p && p.name) {
+      const who = p.name;
+      S.lobbySeats[seat] = { name: who, connected: false };
+      if (S.game) {
+        const gp = S.game.players.find((x) => x.seat === seat);
+        if (gp) gp.connected = false;
+      }
+      const entry = sysMsg(who + ' 掉线了，等待重连…');
       hostBroadcastChat(entry);
-      UI.toast(`${who} 掉线了，等待重连`);
+      UI.toast(who + ' 掉线了，等待重连');
     }
   }
   if (S.game && S.game.phase !== PHASE.LOBBY) pushStates();
@@ -294,7 +339,7 @@ function hostOnSeatGone(seat) {
 
 function hostAction(seat, act) {
   if (S.role !== 'host' || !act || typeof act !== 'object') return;
-  if (seat >= 2) {
+  if (!isPlayerSeat(seat)) {
     UI.toast('观战不能操作');
     return;
   }
@@ -326,31 +371,39 @@ function hostAction(seat, act) {
     hostBroadcastChat(entry);
   };
 
-  if (notation) say(`${seatName(S.game.history[S.game.history.length - 1].side === 'r' ? 0 : 1)}：${notation}`);
+  if (notation) {
+    const last = S.game.history[S.game.history.length - 1];
+    say(seatName(last.seat) + '：' + notation);
+  }
 
-  // 悔棋 / 求和请求的交互过程也记进聊天，双方都能看到发生了什么
-  if (act.type === 'undo' && res && res.ok) say(`${seatName(seat)} 请求悔棋`);
+  // 悔棋 / 求和请求的交互过程也记进聊天，所有玩家都能看到发生了什么
+  if (act.type === 'undo' && res && res.ok) say(seatName(seat) + ' 请求悔棋');
   if (act.type === 'undoReply' && res) {
-    if (res.accepted) say(`${seatName(seat)} 同意悔棋，回退 ${res.popped} 手`);
-    else say(`${seatName(seat)} 拒绝了悔棋`);
+    if (res.accepted) say(seatName(seat) + ' 同意悔棋，回退 ' + res.popped + ' 手');
+    else say(seatName(seat) + ' 拒绝了悔棋');
   }
-  if (act.type === 'draw' && res && res.ok) say(`${seatName(seat)} 请求求和`);
+  if (act.type === 'draw' && res && res.ok) {
+    say(seatName(seat) + ' 请求求和（需要其他 ' + (S.playerCount - 1) + ' 位玩家都同意）');
+  }
   if (act.type === 'drawReply' && res) {
-    if (res.accepted) say(`${seatName(seat)} 同意求和`);
-    else say(`${seatName(seat)} 拒绝了求和`);
+    if (res.rejected) say(seatName(seat) + ' 拒绝了求和');
+    else if (res.accepted && res.over) say('所有玩家都同意求和');
+    else if (res.accepted) say(seatName(seat) + ' 同意求和（还差 ' + res.waiting + ' 人）');
   }
 
-  if (S.game.phase === PHASE.OVER && S.game.result) say(`对局结束 · ${S.game.result.text}`);
+  if (S.game.phase === PHASE.OVER && S.game.result) say('对局结束 · ' + S.game.result.text);
   pushStates();
 }
 
-function bothPlayersReady() {
-  return !!(S.lobbyPlayers && S.lobbyPlayers[0].name && S.lobbyPlayers[1].name && S.lobbyPlayers[1].connected);
+/** N 个玩家座位都有人且都在线才能开局 / 再来一局 */
+function allPlayersReady() {
+  if (!S.lobbySeats || S.lobbySeats.length !== S.playerCount) return false;
+  return S.lobbySeats.every((p) => !!p && !!p.name && p.connected);
 }
 
 function startRound() {
   if (!S.game) return;
-  if (!bothPlayersReady()) {
+  if (!allPlayersReady()) {
     UI.toast('有玩家掉线，等他回来再开新局');
     return;
   }
@@ -364,51 +417,44 @@ function startRound() {
 
 function startGame() {
   if (S.role !== 'host') return;
-  if (!bothPlayersReady()) {
-    UI.toast('要两个人都在座位上才能开始');
+  if (!allPlayersReady()) {
+    UI.toast('要 ' + S.playerCount + ' 位玩家都入座才能开始');
     return;
   }
-  S.game = new Game(S.lobbyPlayers.map((p) => ({ name: p.name, connected: true })));
+  S.game = new Game(S.lobbySeats.map((p) => ({ name: p.name, connected: p.connected })), S.playerCount);
   startRound();
 }
 
 function hostRenderLobby() {
-  if (S.role !== 'host') return;
-  const filled = S.lobbyPlayers.filter((p) => p.name).length;
+  if (S.role !== 'host' || !S.lobbySeats) return;
+  const filled = S.lobbySeats.filter((p) => p && p.name).length;
+  const offline = S.lobbySeats.filter((p) => p && p.name && !p.connected).length;
+  let tip;
+  if (filled < S.playerCount) tip = '把房号 ' + S.code + ' 发给朋友，还差 ' + (S.playerCount - filled) + ' 人（多出来的人自动观战）';
+  else if (offline) tip = '有玩家掉线了，等他重新进来';
+  else tip = '人齐了，点「开始对局」';
   UI.renderLobby({
     code: S.code,
-    players: S.lobbyPlayers,
+    players: S.lobbySeats,
     spectators: specNames(),
     youSeat: 0,
     isHost: true,
-    canStart: bothPlayersReady(),
-    tip:
-      filled < 2
-        ? `把房号 ${S.code} 发给朋友，他输入房号即可入座`
-        : S.lobbyPlayers[1].connected
-          ? '人齐了，点「开始对局」'
-          : '蓝方掉线了，等他重新进来',
+    canStart: allPlayersReady(),
+    tip,
+    playerCount: S.playerCount,
   });
   broadcastLobby();
 }
 
 function broadcastLobby() {
-  if (!S.host) return;
-  for (const seat of remoteSeats()) {
-    S.host.send(seat, {
-      t: 'lobby',
-      code: S.code,
-      players: S.lobbyPlayers,
-      spectators: specNames(),
-      youSeat: seat,
-    });
-  }
+  if (!S.host || !S.lobbySeats) return;
+  for (const seat of remoteSeats()) hostSendLobby(seat);
 }
 
 function pushStates() {
   if (S.role !== 'host' || !S.host || !S.game) return;
   for (const seat of remoteSeats()) {
-    const view = S.game.view(seat >= 2 ? -1 : seat);
+    const view = S.game.view(isPlayerSeat(seat) ? seat : -1);
     S.host.send(seat, { t: 'state', view: decorate(view, false) });
   }
   renderMyTable();
@@ -451,14 +497,16 @@ async function joinRoom() {
     });
     S.guest = g;
     await g.join(code, name);
+    // 还没收到房主的大厅同步：先用空座位占位（等 lobby 消息到达后渲染真实座位）
     UI.renderLobby({
       code,
-      players: [{ name: '房主', connected: true }, { name: '', connected: false }],
+      players: [],
       spectators: [],
-      youSeat: 1,
+      youSeat: -1,
       isHost: false,
       canStart: false,
       tip: '正在进入房间…',
+      playerCount: S.playerCount,
     });
   } catch (e) {
     UI.toast(e && e.message ? e.message : '加入失败');
@@ -472,11 +520,13 @@ function guestOnMessage(msg) {
   if (!msg || typeof msg !== 'object') return;
   switch (msg.t) {
     case 'joined':
-      S.seat = typeof msg.seat === 'number' ? msg.seat : 1;
+      S.seat = typeof msg.seat === 'number' ? msg.seat : 0;
+      S.playerCount = clampCount(msg.playerCount || S.playerCount);
       S.code = msg.code || S.code;
       break;
     case 'lobby':
       S.code = msg.code || S.code;
+      S.playerCount = clampCount(msg.playerCount || S.playerCount);
       S.remoteSpecs = msg.spectators || [];
       UI.renderLobby({
         code: S.code,
@@ -486,6 +536,7 @@ function guestOnMessage(msg) {
         isHost: false,
         canStart: false,
         tip: '等待房主开始对局…',
+        playerCount: S.playerCount,
       });
       break;
     case 'chatLog':
@@ -505,7 +556,7 @@ function guestOnMessage(msg) {
       UI.toast(msg.msg || '');
       break;
     case 'full':
-      UI.toast('房间已满（2 位玩家 + 6 位观众）');
+      UI.toast('房间已满（' + S.playerCount + ' 位玩家 + ' + MAX_SPECS + ' 位观战）');
       setTimeout(resetAll, 1500);
       break;
     default:
@@ -535,15 +586,33 @@ function sendChat(text) {
 
 /* ---------------- 绑定事件 ---------------- */
 
+/** 首页人数选择器：选中后 S.playerCount 生效，创建房间时使用 */
+function bindCountPicker() {
+  const box = $('count-pick');
+  if (!box) return;
+  const buttons = [...box.querySelectorAll('button[data-n]')];
+  const sync = () => {
+    for (const b of buttons) b.classList.toggle('on', Number(b.dataset.n) === S.playerCount);
+  };
+  for (const b of buttons) {
+    b.addEventListener('click', () => {
+      S.playerCount = clampCount(b.dataset.n);
+      sync();
+    });
+  }
+  sync();
+}
+
 function boot() {
   $('in-name').value = store.get('tiaoqi-name');
+  bindCountPicker();
   $('btn-create').addEventListener('click', createRoom);
   $('btn-join').addEventListener('click', joinRoom);
   $('btn-start').addEventListener('click', startGame);
   $('btn-leave').addEventListener('click', () => resetAll());
   $('btn-menu').addEventListener('click', () => {
     // 角色说明按 ui.js 约定区分房主 / 观战 / 普通加入者
-    const role = S.role === 'host' ? 'host' : S.seat >= 2 ? 'spectator' : 'guest';
+    const role = S.role === 'host' ? 'host' : isPlayerSeat(S.seat) ? 'guest' : 'spectator';
     UI.showMenu({ code: S.code, role, onQuit: () => resetAll() });
   });
   $('in-code').addEventListener('input', (e) => {

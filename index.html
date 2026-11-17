@@ -7,7 +7,7 @@
 <meta name="color-scheme" content="dark light" />
 <title>中国跳棋 · 联机版</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⭐</text></svg>" />
-<link rel="stylesheet" href="css/style.css?v=1" />
+<link rel="stylesheet" href="css/style.css?v=2" />
 </head>
 <body>
 <div id="app">
@@ -22,6 +22,17 @@
         <span>昵称</span>
         <input id="in-name" maxlength="8" placeholder="给自己起个名字" autocomplete="off" />
       </label>
+
+      <div class="field">
+        <span>人数（房主选择）</span>
+        <div class="seg" id="count-pick">
+          <button type="button" data-n="2" class="on">2 人</button>
+          <button type="button" data-n="3">3 人</button>
+          <button type="button" data-n="4">4 人</button>
+          <button type="button" data-n="5">5 人</button>
+          <button type="button" data-n="6">6 人</button>
+        </div>
+      </div>
       <button class="btn primary block" id="btn-create">创建房间</button>
 
       <div class="divider"><span>或者加入好友的房间</span></div>
@@ -32,7 +43,7 @@
       </label>
       <button class="btn block" id="btn-join">加入房间</button>
 
-      <p class="tip">创建房间拿到房号，把房号发给朋友，他输入房号就能入座。房主执红先行（下方营），先把 10 颗棋子全部走进对面营的一方获胜。第 3 位起自动成为观战。</p>
+      <p class="tip">先选人数（2-6 人）再创建房间，拿到房号后把房号发给朋友，他们输入房号就能入座。人齐后由房主开局，多出来的人自动成为观战。每人 10 颗棋子，先把它们全部送进对面营的一方获胜。</p>
     </div>
   </section>
 
@@ -94,6 +105,6 @@
 <div class="toast" id="toast"></div>
 
 <script src="js/vendor/peerjs.min.js"></script>
-<script type="module" src="js/main.js?v=1"></script>
+<script type="module" src="js/main.js?v=2"></script>
 </body>
 </html>
