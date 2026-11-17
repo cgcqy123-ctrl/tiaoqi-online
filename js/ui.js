@@ -25,6 +25,8 @@ let chatCb = null;
 let boardSig = '';
 let selected = -1; // 当前选中的棋子孔 id，-1 = 未选中
 let reachable = new Map(); // 落点 id → 路径数组
+// 连跳草稿：{ start, path, board, reach }。path 只记录落点；board 是棋子已走到当前落点的虚拟局面
+let chain = null;
 let lastView = null;
 let toastTimer = 0;
 let resignArmed = false;
@@ -259,6 +261,7 @@ if (typeof window !== 'undefined') {
 export function resetSelection() {
   selected = -1;
   reachable = new Map();
+  chain = null;
   boardSig = '';
   if (lastView) renderBoard(lastView, mySeatOf(lastView));
 }
@@ -276,6 +279,7 @@ export function renderTable(view, cb) {
     boardSig = sig;
     selected = -1;
     reachable = new Map();
+    chain = null;
   }
   lastView = view;
   showScreen('table');
@@ -333,7 +337,7 @@ function renderPlayers(view, mySeat) {
   }
 }
 
-/** 全量重建 #board-svg：星形底盘 → 6 个营（谁的家 / 谁的目标）→ 孔 → 上一步标记 → 棋子 → 提示 → 热区 */
+/** 全量重建 #board-svg：星形底盘 → 6 个营（谁的家 / 谁的目标）→ 孔 → 标记 → 棋子 → 提示 → 热区 */
 function renderBoard(view, mySeat) {
   const svg = $('board-svg');
   if (!svg) return;
@@ -342,6 +346,11 @@ function renderBoard(view, mySeat) {
   while (svg.firstChild) svg.removeChild(svg.firstChild);
 
   svg.appendChild(buildDefs());
+
+  // 连跳草稿时用虚拟局面渲染（棋子已经“走”到当前落点，但还没提交）
+  const board = chain ? chain.board : view.board;
+  const hints = chain ? chain.reach : reachable;
+  const current = chain ? chain.path[chain.path.length - 1] : selected;
 
   // 1) 两个大三角拼成六角星（木色底）
   for (const tri of R.BOARD_TRIANGLES) svg.appendChild(svgPolygon(tri, 'board-tri'));
@@ -368,19 +377,27 @@ function renderBoard(view, mySeat) {
     }
   }
 
+  // 4.5) 连跳草稿路径（还没提交，用不同颜色标出来）
+  if (chain) {
+    for (const id of chain.path) {
+      const h = R.HOLES[id];
+      if (h) svg.appendChild(svgCircle(h.px, h.py, LAST_R - 0.04, 'chain', id));
+    }
+  }
+
   // 5) 棋子：按座位号上色（c0..c5），pointer-events: none，点击交给最上层热区
-  for (let id = 0; id < view.board.length; id++) {
-    const seat = view.board[id];
+  for (let id = 0; id < board.length; id++) {
+    const seat = board[id];
     if (isEmptyCell(seat)) continue;
     const h = R.HOLES[id];
     const piece = svgCircle(h.px, h.py, PIECE_R, 'piece c' + seat, id);
-    if (id === selected) piece.classList.add('selected');
+    if (id === current) piece.classList.add('selected');
     piece.addEventListener('click', () => onHoleClick(view, id)); // 真实浏览器里 pointer-events:none 不会触发，兜底给测试用
     svg.appendChild(piece);
   }
 
   // 6) 合法落点提示圈（金色虚线圈）
-  for (const to of reachable.keys()) {
+  for (const to of hints.keys()) {
     const h = R.HOLES[to];
     if (!h) continue;
     const hint = svgCircle(h.px, h.py, HINT_R, 'hint', to);
@@ -392,10 +409,60 @@ function renderBoard(view, mySeat) {
   const myTurn = view.phase === 'play' && mySeat !== null && view.turn === mySeat;
   for (const h of R.HOLES) {
     const hit = svgCircle(h.px, h.py, HIT_R, 'hit', h.id);
-    if (myTurn && view.board[h.id] === mySeat && h.id !== selected) hit.classList.add('mine');
+    if (myTurn && board[h.id] === mySeat) hit.classList.add('mine');
     hit.addEventListener('click', () => onHoleClick(view, h.id));
     svg.appendChild(hit);
   }
+}
+
+/**
+ * 只保留「跳」的后续落点（连跳不能接走一步）；
+ * used 是本回合已经经过的孔，连跳规则不允许重复经过。
+ */
+function jumpContinuations(board, from, used) {
+  const blocked = used || new Set([from]);
+  const out = new Map();
+  for (const [to, path] of R.reachable(board, from)) {
+    if (R.isStep(path)) continue;
+    if (path.slice(1).some((id) => blocked.has(id))) continue;
+    out.set(to, path);
+  }
+  return out;
+}
+
+/** 提交当前连跳草稿 */
+function finishChain() {
+  if (!chain) return;
+  const act = { type: 'move', from: chain.start, path: chain.path.slice() };
+  chain = null;
+  if (actionCb) actionCb(act);
+}
+
+/** 取消连跳草稿 */
+function cancelChain(view, mySeat) {
+  chain = null;
+  selected = -1;
+  reachable = new Map();
+  renderBoard(view, mySeat);
+  renderActions(view, mySeat);
+}
+
+/** 连跳草稿里继续点下一落点 */
+function extendChain(view, mySeat, id) {
+  const cur = chain.path[chain.path.length - 1];
+  const cont = chain.reach.get(id).slice();
+  const nextBoard = R.applyMove(chain.board, cur, cont).board;
+  const path = chain.path.concat(cont.slice(1));
+  const nextReach = jumpContinuations(nextBoard, id, new Set(path));
+  if (nextReach.size > 0) {
+    chain = { start: chain.start, path, board: nextBoard, reach: nextReach };
+    renderBoard(view, mySeat);
+    renderActions(view, mySeat);
+    return;
+  }
+  const act = { type: 'move', from: chain.start, path };
+  chain = null;
+  if (actionCb) actionCb(act);
 }
 
 function onHoleClick(view, id) {
@@ -413,6 +480,31 @@ function onHoleClick(view, id) {
     return;
   }
 
+  // 连跳草稿中：点当前棋子 = 结束连跳；点金色落点 = 继续跳；点其他位置 = 取消
+  if (chain) {
+    const cur = chain.path[chain.path.length - 1];
+    if (id === cur) {
+      finishChain();
+      return;
+    }
+    if (chain.reach.has(id)) {
+      extendChain(view, mySeat, id);
+      return;
+    }
+    if (!isEmptyCell(view.board[id]) && view.board[id] !== mySeat) {
+      cancelChain(view, mySeat);
+      toast('已取消连跳');
+      return;
+    }
+    chain = null;
+    selected = -1;
+    reachable = new Map();
+    renderBoard(view, mySeat);
+    renderActions(view, mySeat);
+    toast('已取消连跳');
+    return;
+  }
+
   const seat = view.board[id]; // null 或 0..5（0 是有效棋子！）
   if (seat === mySeat) {
     // 点自己的棋子：选中 / 取消选中 / 换一颗
@@ -427,9 +519,22 @@ function onHoleClick(view, id) {
     return;
   }
   if (selected >= 0 && reachable.has(id)) {
-    // 点可达落点：发动作
     const from = selected;
     const path = reachable.get(id).slice();
+    // 规则：一手要么走一步，要么全是跳；可以一下一下跳，也可以直接点最远落点一次跳完
+    const isJump = !R.isStep(path);
+    const virtual = R.applyMove(view.board, from, path).board;
+    const cont = isJump ? jumpContinuations(virtual, id, new Set(path)) : new Map();
+    if (path.length === 2 && cont.size > 0) {
+      // 这一下跳完还有得跳：进入逐下连跳模式，由「结束连跳」或下一个落点收尾
+      chain = { start: from, path, board: virtual, reach: cont };
+      selected = -1;
+      reachable = new Map();
+      renderBoard(view, mySeat);
+      renderActions(view, mySeat);
+      toast('可以继续连跳：点金色落点接着跳，或点「结束连跳」');
+      return;
+    }
     selected = -1;
     reachable = new Map();
     if (actionCb) actionCb({ type: 'move', from, path });
@@ -525,6 +630,20 @@ function renderActions(view, mySeat) {
   const bar = $('actions');
   if (!bar) return;
   bar.innerHTML = '';
+
+  // 连跳进行中：只给「结束连跳 / 取消」，避免中途误触其他操作
+  if (chain && mySeat !== null && view.phase === 'play') {
+    const ch = document.createElement('span');
+    ch.className = 'status';
+    ch.textContent = '连跳中：点金色落点接着跳，或点「结束连跳」';
+    bar.appendChild(ch);
+    const sp = document.createElement('span');
+    sp.className = 'spacer';
+    bar.appendChild(sp);
+    bar.appendChild(btn('结束连跳', 'primary tiny', () => finishChain()));
+    bar.appendChild(btn('取消', 'ghost tiny', () => cancelChain(view, mySeat)));
+    return;
+  }
 
   const status = document.createElement('span');
   if (view.phase === 'over') {

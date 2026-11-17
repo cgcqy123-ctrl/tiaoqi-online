@@ -3,6 +3,7 @@
 //       → 点棋子选中/点提示落子 → 多人棋谱（一行一手）→ 各类点击 toast
 //       → 多人求和请求条（进度/同意/拒绝）→ 悔棋请求条 → 操作栏 → 结算（winner=0 与 -1）
 //       → 聊天/快捷语/tab/菜单 → 2/3/6 人随机整局点击模拟
+//       → 连跳逐下交互回归（单次跳进入草稿/继续跳/结束连跳/取消/直接点远点提交）
 // 风格对齐五子棋 test/ui-smoke.mjs：problems 收集 + ✅/❌ + process.exit
 import fs from 'node:fs';
 import path from 'node:path';
@@ -39,6 +40,13 @@ const all = (s) => document.querySelectorAll('#board-svg ' + s);
 const clickEl = (el, desc) => { ok(!!el, desc || '元素存在'); if (el) el.click(); };
 const clickHit = (id, desc) => clickEl(document.querySelector('#board-svg circle.hit[data-id="' + id + '"]'), desc || '热区 ' + id);
 const findBtn = (root, text) => [...root.querySelectorAll('button')].find((b) => b.textContent.includes(text)) || null;
+/** 点落点：若这一下跳完还能继续跳会进入连跳草稿，点「结束连跳」提交当前路径 */
+function clickLanding(id, desc) {
+  clickHit(id, desc);
+  const fin = findBtn($('actions'), '结束连跳');
+  if (fin) fin.click();
+  return pending;
+}
 const dotSeat = (dot) => {
   const cls = [...dot.classList].find((c) => /^c\d$/.test(c));
   return cls ? Number(cls.slice(1)) : -1;
@@ -233,10 +241,10 @@ ok(all('circle.piece.selected').length === 1, '选中 1 颗棋子');
 ok(all('circle.piece.selected[data-id="' + from0 + '"]').length === 1, '选中的棋子带 selected');
 const expectHints = R.reachable(g3.board, from0).size;
 ok(all('circle.hint').length === expectHints, '提示圈数 = rules.reachable 数，实际 ' + all('circle.hint').length + ' / ' + expectHints);
-ok(all('circle.hit.mine').length === 9, '选中后自己的 mine 热区少一个');
+ok(all('circle.hit.mine').length === 10, '选中后自己的 mine 热区仍有 10 个（选中不取消 mine）');
 const hintTo = Number(document.querySelector('#board-svg circle.hint').getAttribute('data-id'));
 const expectPath = R.reachable(g3.board, from0).get(hintTo);
-clickHit(hintTo, '点提示落点');
+clickLanding(hintTo, '点提示落点');
 ok(pending && pending.type === 'move' && pending.from === from0, '点提示落点发出 move，实际：' + JSON.stringify(pending));
 ok(pending && pending.path.join(',') === expectPath.join(','), '动作 path 与 rules.reachable 完全一致');
 g3.action(0, pending);
@@ -260,7 +268,7 @@ renderGame(g4, 1);
 ok(/轮到你走棋（蓝方）/.test($('actions').textContent), '座位 1 回合提示');
 const m1 = movesOf(g4.board, 1)[0];
 clickHit(m1.from, '点座位 1 的棋子');
-clickHit(m1.to, '点座位 1 的落点');
+clickLanding(m1.to, '点座位 1 的落点');
 ok(pending && pending.from === m1.from && pending.path.join(',') === m1.path.join(','), '座位 1 动作正确');
 g4.action(1, pending);
 renderGame(g4, 1);
@@ -305,6 +313,102 @@ clickHit(mineId, '选中自己的棋子');
 ok(all('circle.hint').length > 0, '选中后有提示圈');
 clickHit(60, '点不可达的空格');
 ok(all('circle.hint').length === 0 && all('circle.piece.selected').length === 0, '点不可达空格取消选中');
+
+/* ---------------- 连跳逐下交互回归（v3 新增） ---------------- */
+
+function chainBoard() {
+  const b = new Array(R.SIZE).fill(null);
+  const A = R.holeAt(0, 0);
+  const mid1 = R.holeAt(1, -1);
+  const B = R.holeAt(2, -2);
+  const mid2 = R.holeAt(3, -3);
+  const C = R.holeAt(4, -4);
+  b[A] = 0; // 座位 0 的棋子（0 是有效棋子）
+  b[mid1] = 1; // 第一个被跳的棋子
+  b[mid2] = 1; // 第二个被跳的棋子
+  return { board: b, A, mid1, B, mid2, C };
+}
+function chainGame() {
+  const { board, A, mid1, B, mid2, C } = chainBoard();
+  ok(board[A] === 0 && board[mid1] === 1 && board[B] === null && board[mid2] === 1 && board[C] === null, '连跳构造局面正确');
+  const g = newGame(2);
+  g.board = board;
+  g.turn = 0;
+  return { g, A, B, C };
+}
+const hintIds = () => [...all('circle.hint')].map((e) => Number(e.getAttribute('data-id')));
+const chainIds = () => [...all('circle.chain')].map((e) => Number(e.getAttribute('data-id')));
+const chainStep = () => !!findBtn($('actions'), '结束连跳') || all('circle.chain').length > 0;
+
+// a) 点 A 后 hint 含 B（单跳落点）和 C（连跳最远落点）；点 B 进入草稿（不立刻发动作）
+{
+  const { g, A, B, C } = chainGame();
+  renderGame(g, 0);
+  clickHit(A, '连跳 a：点 A');
+  ok(hintIds().includes(B), '连跳 a：点 A 后 hint 含 B，实际 ' + JSON.stringify(hintIds()));
+  ok(hintIds().includes(C), '连跳 a：点 A 后 hint 含 C');
+  ok(!hintIds().includes(A), '连跳 a：起点不是落点');
+  pending = null;
+  clickHit(B, '连跳 b：点 B');
+  ok(pending === null, '连跳 b：单次跳且还能继续跳时不立刻发动作');
+  ok(!!findBtn($('actions'), '结束连跳') && !!findBtn($('actions'), '取消'), '连跳 b：出现「结束连跳」「取消」按钮');
+  ok(all('circle.piece.selected[data-id="' + B + '"]').length === 1, '连跳 b：棋子已显示在草稿落点 B');
+  ok(all('circle.piece.c0[data-id="' + A + '"]').length === 0, '连跳 b：草稿中起点 A 已空');
+  ok(hintIds().join(',') === String(C), '连跳 b：草稿 hint 只剩 C（不能跳回已过的孔），实际 ' + JSON.stringify(hintIds()));
+  ok(chainIds().length >= 2, '连跳 b：路径上有 circle.chain 标记，实际 ' + chainIds().length);
+  ok(chainIds().join(',') === A + ',' + B, '连跳 b：chain 标记在 A/B 路径上');
+  ok($('toast').textContent.includes('可以继续连跳'), '连跳 b：toast 提示可以继续连跳，实际：' + $('toast').textContent);
+  // c) 继续点 C → 自动提交完整 path
+  clickHit(C, '连跳 c：点 C');
+  ok(pending && pending.type === 'move' && pending.from === A, '连跳 c：点 C 发出 move');
+  ok(pending && pending.path.join(',') === [A, B, C].join(','), '连跳 c：自动提交完整 path [A,B,C]，实际 ' + JSON.stringify(pending));
+}
+
+// d) 点 A→B→「结束连跳」→ 只提交当前草稿路径 [A,B]
+{
+  const { g, A, B } = chainGame();
+  renderGame(g, 0);
+  clickHit(A, '连跳 d：点 A');
+  clickHit(B, '连跳 d：点 B');
+  ok(pending === null, '连跳 d：草稿中还没有动作');
+  findBtn($('actions'), '结束连跳').click();
+  ok(pending && pending.from === A && pending.path.join(',') === [A, B].join(','), '连跳 d：「结束连跳」提交 [A,B]，实际 ' + JSON.stringify(pending));
+}
+
+// e) 点 A → 直接点最远的连跳落点 C → 立即提交完整 path
+{
+  const { g, A, B, C } = chainGame();
+  renderGame(g, 0);
+  clickHit(A, '连跳 e：点 A');
+  clickHit(C, '连跳 e：直接点最远落点 C');
+  ok(pending && pending.path.join(',') === [A, B, C].join(','), '连跳 e：直接点远端立即提交 [A,B,C]，实际 ' + JSON.stringify(pending));
+  ok(findBtn($('actions'), '结束连跳') === null, '连跳 e：直接点远端不进入草稿');
+}
+
+// f) 点当前草稿落点上的自己的棋子也能结束连跳
+{
+  const { g, A, B } = chainGame();
+  renderGame(g, 0);
+  clickHit(A, '连跳 f：点 A');
+  clickHit(B, '连跳 f：点 B');
+  ok(chainStep(), '连跳 f：已进入草稿');
+  clickHit(B, '连跳 f：再点草稿落点上的棋子');
+  ok(pending && pending.path.join(',') === [A, B].join(','), '连跳 f：点当前草稿棋子结束连跳，实际 ' + JSON.stringify(pending));
+}
+
+// g) 「取消」放弃草稿并恢复普通操作栏
+{
+  const { g, A, B } = chainGame();
+  renderGame(g, 0);
+  clickHit(A, '连跳 g：点 A');
+  clickHit(B, '连跳 g：点 B');
+  ok(pending === null && chainIds().length >= 2, '连跳 g：已进入草稿');
+  findBtn($('actions'), '取消').click();
+  ok(pending === null, '连跳 g：取消后不发动作');
+  ok(all('circle.chain').length === 0 && all('circle.hint').length === 0, '连跳 g：取消后草稿标记/提示清除');
+  ok(findBtn($('actions'), '结束连跳') === null, '连跳 g：取消后恢复普通操作栏');
+  ok(/轮到你走棋（红方）/.test($('actions').textContent), '连跳 g：取消后状态文字恢复');
+}
 
 /* ---------------- 多人求和请求条 ---------------- */
 
@@ -516,7 +620,7 @@ for (const n of [2, 3, 6]) {
     const expectHintCount = R.reachable(gs.board, pick.from).size;
     clickHit(pick.from, '模拟选中');
     ok(all('circle.hint').length === expectHintCount, 'n=' + n + ' 模拟提示数 = reachable 数');
-    clickHit(pick.to, '模拟点落点');
+    clickLanding(pick.to, '模拟点落点');
     ok(pending && pending.type === 'move' && pending.from === pick.from && pending.path.join(',') === pick.path.join(','), 'n=' + n + ' 模拟动作与 rules 一致');
     if (!pending) break;
     gs.action(seat, pending);
@@ -539,5 +643,5 @@ if (problems.length) {
   console.error('❌ UI 冒烟测试失败：\n - ' + problems.join('\n - '));
   process.exit(1);
 }
-console.log('✅ UI 冒烟测试通过（2/3/6 人：座位/六营/目标环/多人和求条/结算 winner=0 与 -1/三人行棋谱/模拟各 12 手）');
+console.log('✅ UI 冒烟测试通过（2/3/6 人：座位/六营/目标环/多人和求条/结算 winner=0 与 -1/三人行棋谱/模拟各 12 手/连跳逐下回归）');
 process.exit(0);

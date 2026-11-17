@@ -254,7 +254,10 @@ function hostPlay(move) {
   ok(svgAll('circle.hint').length > 0, '房主端点自己棋子后出现提示圈');
   ok(svgAll('circle.piece.selected').length === 1, '房主端选中的棋子有 selected');
   clickHit(move.to);
-  ok(svgAll('circle.hint').length === 0, '房主端落子后提示圈消失');
+  // v3 连跳逐下交互：单次跳且还能继续跳时会进入草稿（不立刻发动作），点「结束连跳」提交
+  const finishChain = findBtn($('actions'), '结束连跳');
+  if (finishChain) finishChain.click();
+  ok(svgAll('circle.hint').length === 0, '房主端提交后提示圈消失');
 }
 
 $('btn-start').click();
